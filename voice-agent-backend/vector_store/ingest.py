@@ -20,6 +20,10 @@ DEFAULT_COLLECTION_NAME = "voice_agent_metadata"
 DEFAULT_EMBEDDING_DIMENSION = 768
 DEFAULT_EMBEDDING_MODEL = "gemini-embedding-2-preview"
 
+# Collections for which the sub_database_id payload index has already been
+# created in this process.  Avoids a redundant PUT on every retrieval call.
+_indexed_collections: set[str] = set()
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -190,6 +194,29 @@ def _get_vector_client() -> QdrantClient:
     return QdrantClient(url=endpoint, api_key=api_key, check_compatibility=False)
 
 
+def _ensure_payload_index(client: QdrantClient, collection_name: str) -> None:
+    """Create a keyword payload index on sub_database_id if it doesn't exist.
+
+    query_points (qdrant-client >= 1.7) requires an index for any field used
+    in a filter.  Creating an index that already exists is a no-op.
+    Skipped when the collection is already tracked in _indexed_collections.
+    """
+    if collection_name in _indexed_collections:
+        return
+    try:
+        client.create_payload_index(
+            collection_name=collection_name,
+            field_name="sub_database_id",
+            field_schema=rest.PayloadSchemaType.KEYWORD,
+            wait=True,
+        )
+        _indexed_collections.add(collection_name)
+    except Exception as exc:
+        # Index already exists or other non-fatal error — log and continue.
+        logger.debug("Payload index on sub_database_id: %s", exc)
+        _indexed_collections.add(collection_name)  # don't retry on next call
+
+
 def _ensure_collection(client: QdrantClient, collection_name: str, vector_size: int) -> str:
     if client.collection_exists(collection_name):
         collection = client.get_collection(collection_name=collection_name)
@@ -222,7 +249,9 @@ def _ensure_collection(client: QdrantClient, collection_name: str, vector_size: 
                         distance=rest.Distance.COSINE,
                     ),
                 )
+            _ensure_payload_index(client, fallback_collection)
             return fallback_collection
+        _ensure_payload_index(client, collection_name)
         return collection_name
 
     client.create_collection(
@@ -232,6 +261,7 @@ def _ensure_collection(client: QdrantClient, collection_name: str, vector_size: 
             distance=rest.Distance.COSINE,
         ),
     )
+    _ensure_payload_index(client, collection_name)
     return collection_name
 
 

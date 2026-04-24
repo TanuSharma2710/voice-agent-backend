@@ -101,9 +101,12 @@ def _extract_tables(
     engine: Engine,
     include_schemas: list[str] | None = None,
     max_tables: int | None = 100,
+    sub_database_id: str | None = None,
 ) -> list[dict[str, Any]]:
     inspector = inspect(engine)
     tables: list[dict[str, Any]] = []
+
+    computed_sub_db_id = sub_database_id or _sub_database_id(engine, None)
 
     for schema_name in _get_schema_names(engine, include_schemas):
         table_names = inspector.get_table_names(schema=schema_name)
@@ -148,9 +151,11 @@ def _extract_tables(
                 "table_comment": _safe_table_comment(inspector, table_name, schema_name),
             }
 
+            resolved_sub_db_id = sub_database_id if sub_database_id else _sub_database_id(engine, schema_name)
+
             tables.append(
                 {
-                    "sub_database_id": _sub_database_id(engine, schema_name),
+                    "sub_database_id": resolved_sub_db_id,
                     "schema_name": schema_name,
                     "table_name": table_name,
                     "schema": table_schema,
@@ -194,6 +199,8 @@ def _apply_groq_rate_limit(
 
 def urlprocessor(
     db_url: str,
+    sub_database_id: str | None = None,
+    user_id: str | None = None,
     user_table_description: str | None = None,
     include_schemas: list[str] | None = None,
     max_tables: int | None = 100,
@@ -201,6 +208,8 @@ def urlprocessor(
     """
     Extract table metadata from the database URL, enrich it with AI descriptions,
     chunk it, and store it in the vector database.
+
+    Returns sub_database_id which is used to link all chunks to this database.
     """
 
     try:
@@ -217,6 +226,7 @@ def urlprocessor(
             engine=engine,
             include_schemas=include_schemas,
             max_tables=max_tables,
+            sub_database_id=sub_database_id,
         )
     except SQLAlchemyError as exc:
         return {
@@ -224,6 +234,10 @@ def urlprocessor(
             "message": f"Database metadata extraction failed: {exc}",
             "tables_processed": 0,
         }
+
+    resolved_sub_db_id = extracted_tables[0].get("sub_database_id") if extracted_tables else None
+    if not resolved_sub_db_id and sub_database_id:
+        resolved_sub_db_id = sub_database_id
 
     enriched_tables: list[dict[str, Any]] = []
     requests_per_window = int(os.getenv("GROQ_REQUESTS_PER_MINUTE", "20"))
@@ -268,6 +282,7 @@ def urlprocessor(
     return {
         "status": "success",
         "tables_processed": len(enriched_tables),
+        "sub_database_id": resolved_sub_db_id,
         "message": (
             f"Processed {len(enriched_tables)} tables and stored {store_result.get('stored_chunks', 0)} chunks."
         ),
